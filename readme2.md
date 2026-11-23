@@ -321,3 +321,6 @@ The kiosk photo/card routes are also available without `/api/v1`:
 - Plain HTTP is enabled only for local development.
 - The speech recognizer depends on Android/Google services and may need internet access.
 - Current light commands produce text responses only; no GPIO or physical relay is connected.
+
+command to check the mqtt connected
+.\.venv\Scripts\python.exe -c "import paho.mqtt.client as mqtt; c=mqtt.Client(mqtt.CallbackAPIVersion.VERSION2); c.username_pw_set('mqtt_user_iiot','Neilsoft@1'); c.connect('10.1.1.177',1883,10); print('MQTT_CONNECTED'); c.disconnect()"
