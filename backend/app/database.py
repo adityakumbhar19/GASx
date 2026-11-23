@@ -1,3 +1,4 @@
+
 """PostgreSQL access for employees, cards, attendance, and photos."""
 import os
 from datetime import datetime

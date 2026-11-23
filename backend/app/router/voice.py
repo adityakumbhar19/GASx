@@ -19,7 +19,8 @@ def process_voice_command(payload: VoiceCommandRequest) -> VoiceCommandResponse:
     has_off = "off" in words or "disable" in words
 
     if not has_light:
-        return VoiceCommandResponse(
+        return VoiceCommandResponse
+    se(
             success=False,
             action="unknown",
             spoken_text=text,
