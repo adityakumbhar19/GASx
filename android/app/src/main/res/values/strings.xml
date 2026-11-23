@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">NFC Employee Welcome</string>
+    <string name="title">NFC Employee Welcome</string>
+
+    <string name="ready_title">Ready to Scan</string>
+    <string name="unavailable_title">Server Unreachable</string>
+    <string name="instruction_tap">Tap your employee ID card on the card reader.</string>
+    <string name="conn_connecting">Connecting to server…</string>
+    <string name="conn_connected">Server connected</string>
+    <string name="conn_disconnected">Server unreachable</string>
+    <string name="instruction_nfc_off">Turn on NFC in Settings, then tap your card on the back of your phone.</string>
+    <string name="instruction_no_nfc">This device has no NFC. Use Test Mode below to try the backend.</string>
+
+    <string name="nfc_status_ready">NFC ready</string>
+    <string name="nfc_status_off">NFC is turned off</string>
+    <string name="nfc_status_unsupported">NFC not supported</string>
+    <string name="btn_nfc_settings">Open NFC settings</string>
+    <string name="err_nfc_settings">Could not open NFC settings. Enable NFC manually.</string>
+
+    <string name="status_waiting">Waiting for card</string>
+    <string name="status_reading">Reading NFC card</string>
+    <string name="status_identifying">Identifying employee</string>
+    <string name="status_identified">Employee identified</string>
+    <string name="status_unknown">Unknown card</string>
+    <string name="status_backend_error">Backend connection error</string>
+    <string name="status_nfc_error">NFC read error</string>
+
+    <string name="card_employee_title">Employee Information</string>
+    <string name="label_employee_name">Employee Name</string>
+    <string name="label_employee_id">Employee ID</string>
+    <string name="label_nfc_uid">NFC UID</string>
+
+    <string name="card_last_title">Last Successful Scan</string>
+    <string name="last_none">No successful scan yet</string>
+    <string name="label_scanned_at">Scanned at</string>
+    <string name="last_id_format">Employee ID: %1$s</string>
+    <string name="last_time_format">Scanned at: %1$s</string>
+
+    <string name="unregistered_card">Unregistered Card</string>
+    <string name="manual_suffix">%1$s (manual test)</string>
+
+    <string name="test_title">Test Mode</string>
+    <string name="test_subtitle">Manual UID entry. Does not use the NFC reader.</string>
+    <string name="test_switch">Enable manual test</string>
+    <string name="test_hint">NFC UID (hex)</string>
+    <string name="test_button">Test UID</string>
+    <string name="test_uid_required">Enter an NFC UID</string>
+
+    <string name="tts_warning">Voice announcements unavailable: %1$s</string>
+    <string name="tts_init_failed">Text-to-speech engine failed to start</string>
+    <string name="tts_no_english">English voice data is missing or unsupported on this device</string>
+    <string name="tts_speak_failed">Could not play the voice announcement</string>
+    <string name="tts_unavailable">Voice engine is not available</string>
+
+    <string name="err_nfc_read">Could not read the card UID. Hold the card steady and try again.</string>
+    <string name="err_config">Backend URL is invalid. Set a valid BASE_URL in app/build.gradle.</string>
+    <string name="err_no_network">No Wi-Fi or mobile connection. Connect to the same network as the backend.</string>
+    <string name="err_timeout">Request timed out. Is the backend running and reachable?</string>
+    <string name="err_unreachable">Cannot reach the backend. Check BASE_URL, Wi-Fi and the laptop firewall.</string>
+    <string name="err_network">Network error: %1$s</string>
+    <string name="err_unexpected">Unexpected error: %1$s</string>
+    <string name="err_invalid_request">Backend rejected the request (HTTP 422): invalid UID format.</string>
+    <string name="err_server">Backend server error (HTTP %1$d).</string>
+    <string name="err_http">Unexpected backend response (HTTP %1$d).</string>
+</resources>

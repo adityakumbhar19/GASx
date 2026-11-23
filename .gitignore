@@ -1,0 +1,25 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Environment and secrets
+.env
+.env.*
+*.pem
+
+# IDE/editor
+.vscode/
+.idea/
+*.iml
+
+# Android/Gradle
+.gradle/
+**/build/
+local.properties
+
+# OS files
+.DS_Store
+Thumbs.db
