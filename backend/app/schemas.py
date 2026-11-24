@@ -92,3 +92,35 @@ class VoiceCommandResponse(BaseModel):
     action: str
     spoken_text: str
     message: str
+
+
+class AssistantSessionRequest(IdentifyRequest):
+    """Create/resume an assistant session. Same NFC UID validation and normalization as IdentifyRequest."""
+
+
+class AssistantSessionResponse(BaseModel):
+    success: bool
+    session_id: str
+    employee_name: str
+    message: str
+    resumed: bool = False
+
+
+class AssistantChatRequest(BaseModel):
+    session_id: str = Field(..., min_length=8, max_length=256)
+    message: str = Field(..., min_length=1, max_length=1000)
+
+    @field_validator("message")
+    @classmethod
+    def message_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("message must not be empty")
+        return value
+
+
+class AssistantChatResponse(BaseModel):
+    success: bool
+    session_id: str
+    employee_name: str
+    reply: str

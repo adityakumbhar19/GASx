@@ -2,6 +2,7 @@
 
 Run:  uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 """
+import os
 import logging
 from datetime import datetime, timezone
 
@@ -11,10 +12,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load backend/.env BEFORE the app modules below are imported, because some of them
+# (e.g. database.py) read their settings from the environment at import time.
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+
 from app.router.employee import router as employee_router
 from app.router.scan import router as scan_router
 from app.router.kiosk import router as kiosk_router
 from app.router.voice import router as voice_router
+from app.router.assistant import router as assistant_router
 from app.schemas import HealthResponse
 from app.database import init_db
 from app.seed import seed_employees
@@ -46,10 +56,18 @@ app.include_router(kiosk_router)
 app.include_router(kiosk_router, prefix="/api/v1")
 app.include_router(voice_router, prefix="/api/v1")
 app.include_router(voice_router)
+app.include_router(assistant_router, prefix="/api/v1")
 
 
 @app.on_event("startup")
 def startup() -> None:
+    database_enabled = os.getenv("DATABASE_ENABLED", "true").lower() == "true"
+
+    if not database_enabled:
+        logger.warning(
+            "DATABASE DISABLED: Starting in development mode without PostgreSQL."
+        )
+        return
     init_db()
     seed_employees()
 

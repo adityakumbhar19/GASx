@@ -1,6 +1,7 @@
 """Voice command parsing and MQTT light control endpoints."""
 import json
 import logging
+import os
 import re
 
 from fastapi import APIRouter
@@ -11,21 +12,32 @@ from app.schemas import VoiceCommandRequest, VoiceCommandResponse
 router = APIRouter(tags=["Voice"])
 logger = logging.getLogger(__name__)
 
-MQTT_HOST = "10.1.1.177"
-MQTT_PORT = 1883
-MQTT_USERNAME = "mqtt_user_iiot"
-MQTT_PASSWORD = "Neilsoft@1"
-MQTT_TOPIC = "relayCtr"
-MQTT_DEVICE_NAME = "2c:bc:bb:0d:07:20"
+
+def _mqtt_settings() -> dict:
+    """MQTT connection settings, read from the backend environment (backend/.env) at call time.
+    Username and password have NO default: if they are missing, the light command fails safely."""
+    username = os.getenv("MQTT_USERNAME", "").strip()
+    password = os.getenv("MQTT_PASSWORD", "")
+    if not username or not password:
+        raise RuntimeError("MQTT_USERNAME and MQTT_PASSWORD are not set in the backend environment")
+    return {
+        "host": os.getenv("MQTT_HOST", "10.1.1.177"),
+        "port": int(os.getenv("MQTT_PORT", "1883")),
+        "username": username,
+        "password": password,
+        "topic": os.getenv("MQTT_TOPIC", "relayCtr"),
+        "device_name": os.getenv("MQTT_DEVICE_NAME", "2c:bc:bb:0d:07:20"),
+    }
 
 
 def publish_light_state(state: str) -> None:
-    payload = json.dumps({"NM": MQTT_DEVICE_NAME, "state": state}, separators=(",", ":"))
+    settings = _mqtt_settings()
+    payload = json.dumps({"NM": settings["device_name"], "state": state}, separators=(",", ":"))
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-    client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
-    client.connect(MQTT_HOST, MQTT_PORT, keepalive=10)
+    client.username_pw_set(settings["username"], settings["password"])
+    client.connect(settings["host"], settings["port"], keepalive=10)
     try:
-        result = client.publish(MQTT_TOPIC, payload)
+        result = client.publish(settings["topic"], payload)
         result.wait_for_publish()
         if result.rc != mqtt.MQTT_ERR_SUCCESS:
             raise RuntimeError(f"MQTT publish failed with result code {result.rc}")
