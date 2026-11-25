@@ -1,4 +1,4 @@
-# NFC Employee Welcome and Light Voice Commands
+# GASx--- Smart Lab 
 
 A Windows/Android kiosk prototype that combines employee NFC attendance with a spoken light-command control demonstration.
 
