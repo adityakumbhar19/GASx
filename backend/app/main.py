@@ -2,7 +2,6 @@
 
 Run:  uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 """
-import os
 import logging
 from datetime import datetime, timezone
 
@@ -27,6 +26,7 @@ from app.router.voice import router as voice_router
 from app.router.assistant import router as assistant_router
 from app.schemas import HealthResponse
 from app.database import init_db
+from app.employees import use_memory_employees
 from app.seed import seed_employees
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
@@ -61,11 +61,10 @@ app.include_router(assistant_router, prefix="/api/v1")
 
 @app.on_event("startup")
 def startup() -> None:
-    database_enabled = os.getenv("DATABASE_ENABLED", "true").lower() == "true"
-
-    if not database_enabled:
+    if use_memory_employees():
         logger.warning(
-            "DATABASE DISABLED: Starting in development mode without PostgreSQL."
+            "EMPLOYEE_SOURCE=memory: using the hardcoded EMPLOYEES in app/employees.py. "
+            "PostgreSQL is NOT used (no stored attendance, photos or kiosk endpoints)."
         )
         return
     init_db()

@@ -4,7 +4,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Query
 
-from app import database
+from app import employees as employee_directory
 from app import events as event_store
 from app.schemas import EventsResponse, IdentifyRequest, IdentifyResponse
 
@@ -19,7 +19,7 @@ def register_scan(payload: IdentifyRequest) -> IdentifyResponse:
     Looks the UID up in PostgreSQL, records the attendance direction, and
     records a compatible event for the Android app to pick up.
     """
-    employee = database.record_tap(payload.nfc_uid)
+    employee = employee_directory.record_tap(payload.nfc_uid)
 
     if employee is None:
         response = IdentifyResponse(success=False, message="Unregistered NFC card")
@@ -29,7 +29,7 @@ def register_scan(payload: IdentifyRequest) -> IdentifyResponse:
             message="Employee identified successfully",
             employee_id=employee["employee_id"],
             employee_name=employee["employee_name"],
-            photo_url=f"/photo/{employee['id']}",
+            photo_url=None if employee_directory.use_memory_employees() else f"/photo/{employee['id']}",
         )
 
     if employee is not None and not employee["duplicate"]:
