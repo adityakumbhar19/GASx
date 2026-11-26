@@ -21,8 +21,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
-from app.services import context_service
-from app.services.llm_service import LLMService
+from app.services import context_service, device_service, intent_service
+from app.services.llm_service import LLMService, LLMServiceError
 
 logger = logging.getLogger("nfc-welcome.assistant")
 
@@ -42,6 +42,8 @@ class AssistantSession:
     last_active: float
     messages: List[Dict[str, str]] = field(default_factory=list, repr=False)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)  # serialises chat turns
+    last_light_at: Optional[float] = field(default=None, repr=False)        # last light command sent (monotonic time)
+    awaiting_choice_at: Optional[float] = field(default=None, repr=False)   # when we asked "on or off?"
 
 
 class SessionStore(ABC):
@@ -157,19 +159,105 @@ def get_session_store() -> SessionStore:
     return _store
 
 
+_now = time.monotonic          # indirection so tests can control time
+
+DEVICE_CONTEXT_SECONDS = 120.0   # how long "turn it off" / a bare "on" still refers to the light
+
+CLARIFY_REPLY = "Do you want me to turn the light on or off?"
+LIGHT_FAILED_REPLY = "I couldn't send the light command. Please try again."
+PARTIAL_FALLBACK_REPLY = "I couldn't answer the rest of your message right now."
+# Wording is deliberate: publishing to the broker is not proof that the relay switched (no feedback channel).
+LIGHT_SENT_REPLY = {
+    "on": "I've sent the command to turn on the light.",
+    "off": "I've sent the command to turn off the light.",
+}
+
+
+@dataclass(frozen=True)
+class ChatOutcome:
+    """Result of one assistant turn. `action` tells the client what happened; `reply` is always what to speak."""
+    reply: str
+    action: str = "chat"            # chat | device_control | device_control_failed | clarification | unsupported_device
+    device: Optional[str] = None
+    state: Optional[str] = None
+
+
+def _join_names(names) -> str:
+    names = list(names)
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
+async def _answer_with_llm(session: AssistantSession, text: str, llm_provider: Callable[[], LLMService]) -> str:
+    llm = llm_provider()
+    system_prompt = context_service.build_system_prompt(session.employee_name, session.department)
+    return await llm.generate(system_prompt, list(session.messages) + [{"role": "user", "content": text}])
+
+
+async def _handle_device_intent(session: AssistantSession, intent: intent_service.Intent, message: str,
+                                llm_provider: Callable[[], LLMService], store: SessionStore,
+                                now: float) -> ChatOutcome:
+    """Run a device command without involving the LLM, then (only if the message also contained a
+    normal question) answer that remainder with the LLM so neither half of the message is lost."""
+    parts: List[str] = []
+    device: Optional[str] = None
+    state: Optional[str] = None
+
+    if intent.kind is intent_service.IntentKind.LIGHT:
+        device, state = "light", intent.state
+        if await device_service.set_light(intent.state):
+            action = "device_control"
+            parts.append(LIGHT_SENT_REPLY[intent.state])
+            session.last_light_at = now
+        else:
+            action = "device_control_failed"
+            parts.append(LIGHT_FAILED_REPLY)
+        if intent.unsupported_devices:
+            parts.append(f"I can't control the {_join_names(intent.unsupported_devices)} yet.")
+    elif intent.kind is intent_service.IntentKind.CLARIFY:
+        device, action = "light", "clarification"
+        session.awaiting_choice_at = now
+        parts.append(CLARIFY_REPLY)
+    else:  # UNSUPPORTED
+        names = intent.unsupported_devices or ("device",)
+        device, action = names[0].lower(), "unsupported_device"
+        parts.append(f"I can only control the light right now, so I can't do that with the {_join_names(names)} yet.")
+
+    if intent.remainder:
+        try:
+            parts.append(await _answer_with_llm(session, intent.remainder, llm_provider))
+        except LLMServiceError:
+            parts.append(PARTIAL_FALLBACK_REPLY)   # the command already happened; do not fail the whole turn
+
+    reply = " ".join(parts)
+    store.append_exchange(session, message, reply)
+    return ChatOutcome(reply=reply, action=action, device=device, state=state)
+
+
 async def chat(session_id: str, message: str, llm_provider: Callable[[], LLMService],
-               store: Optional[SessionStore] = None) -> Tuple[AssistantSession, str]:
-    """Run one conversation turn. The exchange is saved only if the LLM call succeeds, so a failed
-    request leaves the history untouched and the user can simply repeat themselves."""
+               store: Optional[SessionStore] = None) -> Tuple[AssistantSession, ChatOutcome]:
+    """Run one conversation turn: detect the intent first, then either control the device or ask the LLM.
+
+    Normal conversation keeps the old guarantee: the exchange is saved only if the LLM call succeeds, so a
+    failed request leaves the history untouched and the user can simply repeat themselves.
+    """
     store = store or get_session_store()
     session = store.get(session_id)
     if session is None:
         raise SessionNotFoundError()
 
-    llm = llm_provider()   # resolved after the session check: bad session -> 401 even if LLM is unconfigured
     async with session.lock:
-        history = list(session.messages)
-        system_prompt = context_service.build_system_prompt(session.employee_name, session.department)
-        reply = await llm.generate(system_prompt, history + [{"role": "user", "content": message}])
-        store.append_exchange(session, message, reply)
-    return session, reply
+        now = _now()
+        light_context = session.last_light_at is not None and now - session.last_light_at <= DEVICE_CONTEXT_SECONDS
+        awaiting_choice = (session.awaiting_choice_at is not None
+                           and now - session.awaiting_choice_at <= DEVICE_CONTEXT_SECONDS)
+        session.awaiting_choice_at = None          # a clarification only applies to the very next message
+
+        intent = intent_service.detect_intent(message, light_context=light_context, awaiting_choice=awaiting_choice)
+        logger.info("Assistant intent: %s", intent.kind.value)       # never log the message text
+
+        if intent.kind is not intent_service.IntentKind.CHAT:
+            return session, await _handle_device_intent(session, intent, message, llm_provider, store, now)
+
+        reply = await _answer_with_llm(session, message, llm_provider)   # resolved after the session check:
+        store.append_exchange(session, message, reply)                   # bad session -> 401 even if LLM unconfigured
+    return session, ChatOutcome(reply=reply)

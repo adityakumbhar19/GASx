@@ -124,3 +124,8 @@ class AssistantChatResponse(BaseModel):
     session_id: str
     employee_name: str
     reply: str
+    # Added for device control. Old clients that ignore unknown JSON fields keep working unchanged.
+    # success is true whenever `reply` is valid; `action` says what actually happened.
+    action: str = "chat"            # chat | device_control | device_control_failed | clarification | unsupported_device
+    device: Optional[str] = None    # "light" when a light command / clarification was involved
+    state: Optional[str] = None     # "on" | "off" for light commands

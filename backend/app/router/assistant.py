@@ -53,7 +53,7 @@ async def create_session(payload: AssistantSessionRequest) -> AssistantSessionRe
 @router.post("/chat", response_model=AssistantChatResponse, summary="Send one message to the assistant")
 async def chat(payload: AssistantChatRequest) -> AssistantChatResponse:
     try:
-        session, reply = await conversation_service.chat(
+        session, outcome = await conversation_service.chat(
             payload.session_id, payload.message, llm_provider=get_llm_service
         )
     except SessionNotFoundError:
@@ -65,5 +65,8 @@ async def chat(payload: AssistantChatRequest) -> AssistantChatResponse:
         success=True,
         session_id=payload.session_id,
         employee_name=session.employee_name,
-        reply=reply,
+        reply=outcome.reply,
+        action=outcome.action,
+        device=outcome.device,
+        state=outcome.state,
     )

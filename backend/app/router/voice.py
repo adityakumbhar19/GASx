@@ -32,15 +32,42 @@ def _mqtt_settings() -> dict:
 
 def publish_light_state(state: str) -> None:
     settings = _mqtt_settings()
-    payload = json.dumps({"NM": settings["device_name"], "state": state}, separators=(",", ":"))
+
+    payload = json.dumps({
+        "NM": settings["device_name"],
+        "state": state
+    }, separators=(",", ":"))
+
+    logger.info("MQTT HOST: %s", settings["host"])
+    logger.info("MQTT TOPIC: %s", settings["topic"])
+    logger.info("MQTT PAYLOAD: %s", payload)
+
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-    client.username_pw_set(settings["username"], settings["password"])
-    client.connect(settings["host"], settings["port"], keepalive=10)
+
+    client.username_pw_set(
+        settings["username"],
+        settings["password"]
+    )
+
+    client.connect(
+        settings["host"],
+        settings["port"],
+        keepalive=10
+    )
+
     try:
         result = client.publish(settings["topic"], payload)
         result.wait_for_publish()
+
+        logger.info("MQTT publish result code: %s", result.rc)
+
         if result.rc != mqtt.MQTT_ERR_SUCCESS:
-            raise RuntimeError(f"MQTT publish failed with result code {result.rc}")
+            raise RuntimeError(
+                f"MQTT publish failed: {result.rc}"
+            )
+
+        logger.info("MQTT message published successfully")
+
     finally:
         client.disconnect()
 
