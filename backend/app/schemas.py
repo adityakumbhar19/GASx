@@ -1,6 +1,6 @@
 """Pydantic request/response models. Android's Retrofit models mirror these exactly."""
 import re
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -119,13 +119,20 @@ class AssistantChatRequest(BaseModel):
         return value
 
 
+class ToolCallInfo(BaseModel):
+    tool: str
+    arguments: Dict[str, Any] = Field(default_factory=dict)
+    success: bool
+
+
 class AssistantChatResponse(BaseModel):
     success: bool
     session_id: str
     employee_name: str
     reply: str
-    # Added for device control. Old clients that ignore unknown JSON fields keep working unchanged.
+    # Fields below were added for device control. Old clients that ignore unknown JSON fields keep working.
     # success is true whenever `reply` is valid; `action` says what actually happened.
-    action: str = "chat"            # chat | device_control | device_control_failed | clarification | unsupported_device
-    device: Optional[str] = None    # "light" when a light command / clarification was involved
+    action: str = "chat"            # chat | device_control | device_control_failed
+    device: Optional[str] = None    # "light" when a device tool ran
     state: Optional[str] = None     # "on" | "off" for light commands
+    tool_calls: List[ToolCallInfo] = Field(default_factory=list)   # tools the assistant used this turn

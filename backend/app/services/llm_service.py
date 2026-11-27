@@ -12,8 +12,8 @@ import logging
 import os
 import re
 import time
-from dataclasses import dataclass
-from typing import Dict, Optional, Sequence
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Sequence
 
 import openai
 from openai import AsyncOpenAI
@@ -107,6 +107,20 @@ def clean_reply(text: str) -> str:
     return re.sub(r"\s{2,}", " ", text).strip()
 
 
+@dataclass(frozen=True)
+class ToolCallRequest:
+    """One tool call the model asked for. Nothing here has been validated or executed yet."""
+    id: str
+    name: str
+    arguments: str          # raw JSON text exactly as the model produced it
+
+
+@dataclass(frozen=True)
+class LLMTurn:
+    text: str                                            # cleaned, speakable; may be empty when tool_calls exist
+    tool_calls: List[ToolCallRequest] = field(default_factory=list)
+
+
 class LLMService:
     def __init__(self, settings: LLMSettings, client: Optional[AsyncOpenAI] = None):
         self.settings = settings
@@ -134,14 +148,19 @@ class LLMService:
                 return payload
         return [{"role": "user", "content": system_instruction}] + payload
 
-    async def generate(self, system_instruction: str, messages: Sequence[Dict[str, str]]) -> str:
-        kwargs = {
+    async def _create(self, system_instruction: str, messages: Sequence[Dict[str, Any]],
+                      tools: Optional[List[Dict[str, Any]]] = None, tool_choice: str = "auto"):
+        """One Chat Completions call with all error handling. Returns the raw response."""
+        kwargs: Dict[str, Any] = {
             "model": self.settings.model,
             "messages": self._build_messages(system_instruction, messages),
             "max_tokens": self.settings.max_tokens,
         }
         if self.settings.temperature is not None:
             kwargs["temperature"] = self.settings.temperature
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = tool_choice
 
         started = time.monotonic()
         try:
@@ -161,25 +180,52 @@ class LLMService:
             raise LLMServiceError("The assistant is busy. Please try again in a moment.") from None
         except openai.APIStatusError as exc:
             detail = str(getattr(exc, "message", ""))[:200]
+            if tools and exc.status_code in (400, 404) and "tool" in detail.lower():
+                logger.error("LLM_MODEL=%s does not support tool calling (HTTP %s: %s). Choose a model/provider "
+                             "with function-calling support.", self.settings.model, exc.status_code, detail)
+                raise LLMServiceError("The assistant model does not support tool calling.") from None
             logger.error("LLM provider returned HTTP %s: %s", exc.status_code, detail)
             raise LLMServiceError("The assistant is temporarily unavailable.") from None
         except openai.OpenAIError as exc:
             logger.error("LLM client error: %s", type(exc).__name__)
             raise LLMServiceError("The assistant is temporarily unavailable.") from None
 
-        choices = getattr(response, "choices", None) or []
-        message = choices[0].message if choices else None
-        reply = clean_reply((message.content if message else "") or "")
-        if not reply:
-            finish = choices[0].finish_reason if choices else "no-choices"
-            logger.warning("LLM returned no usable text (finish_reason=%s)", finish)
-            raise LLMServiceError("The assistant did not return an answer. Please try again.")
-
         usage = getattr(response, "usage", None)
         logger.info("LLM reply in %.2fs (prompt_tokens=%s completion_tokens=%s)",
                     time.monotonic() - started,
                     getattr(usage, "prompt_tokens", "?"), getattr(usage, "completion_tokens", "?"))
-        return reply
+        return response
+
+    async def complete(self, system_instruction: str, messages: Sequence[Dict[str, Any]],
+                       tools: Optional[List[Dict[str, Any]]] = None, tool_choice: str = "auto") -> LLMTurn:
+        """One model step. Returns either the speakable answer or the tool calls the model wants.
+        `messages` may contain earlier assistant tool_calls and role="tool" results."""
+        response = await self._create(system_instruction, messages, tools, tool_choice)
+        choices = getattr(response, "choices", None) or []
+        message = choices[0].message if choices else None
+
+        calls: List[ToolCallRequest] = []
+        for index, raw in enumerate(getattr(message, "tool_calls", None) or []):
+            function = getattr(raw, "function", None)
+            name = getattr(function, "name", "") or ""
+            if not name:
+                continue
+            calls.append(ToolCallRequest(id=getattr(raw, "id", None) or f"call_{index}", name=name,
+                                         arguments=getattr(function, "arguments", "") or ""))
+
+        text = clean_reply((message.content if message else "") or "")
+        if not text and not calls:
+            finish = choices[0].finish_reason if choices else "no-choices"
+            logger.warning("LLM returned no usable text (finish_reason=%s)", finish)
+            raise LLMServiceError("The assistant did not return an answer. Please try again.")
+        return LLMTurn(text=text, tool_calls=calls)
+
+    async def generate(self, system_instruction: str, messages: Sequence[Dict[str, Any]]) -> str:
+        """Plain text answer, no tools (kept for callers that do not need tool calling)."""
+        text = (await self.complete(system_instruction, messages)).text
+        if not text:
+            raise LLMServiceError("The assistant did not return an answer. Please try again.")
+        return text
 
 
 _service: Optional[LLMService] = None

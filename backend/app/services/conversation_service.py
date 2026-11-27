@@ -1,5 +1,9 @@
 """Employee-bound assistant sessions and the chat orchestration.
 
+One assistant workflow for everything: every message goes to the LLM together with the registered tool
+definitions (app/tools). The LLM decides whether to answer in text or call a tool; this module runs the
+tool-calling loop. There is no keyword/intent routing in front of the LLM.
+
 Design: ONE persistent session per employee. Tapping the card again returns the same session
 (same history) instead of starting a new one. A session ends only after a long idle period
 (ASSISTANT_SESSION_IDLE_HOURS, default 24; 0 = never) or when the server restarts.
@@ -19,10 +23,13 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from app.services import context_service, device_service, intent_service
+from app.services import context_service
 from app.services.llm_service import LLMService, LLMServiceError
+from app.services.tool_executor import ExecutedCall, ToolExecutor
+from app.tools import get_tool_registry
+from app.tools.registry import ToolContext, ToolRegistry
 
 logger = logging.getLogger("nfc-welcome.assistant")
 
@@ -40,10 +47,9 @@ class AssistantSession:
     department: Optional[str] = field(repr=False)
     created_at: float
     last_active: float
-    messages: List[Dict[str, str]] = field(default_factory=list, repr=False)
+    # OpenAI-format history: user / assistant (incl. tool_calls) / tool messages, always in whole turns
+    messages: List[Dict[str, Any]] = field(default_factory=list, repr=False)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)  # serialises chat turns
-    last_light_at: Optional[float] = field(default=None, repr=False)        # last light command sent (monotonic time)
-    awaiting_choice_at: Optional[float] = field(default=None, repr=False)   # when we asked "on or off?"
 
 
 class SessionStore(ABC):
@@ -56,8 +62,13 @@ class SessionStore(ABC):
         """Return the live session (refreshing its idle timer) or None if unknown/expired."""
 
     @abstractmethod
+    def append_turn(self, session: AssistantSession, messages: List[Dict[str, Any]]) -> None:
+        """Store one completed turn: the user message, any assistant tool calls and tool results, and the
+        final assistant reply. History is trimmed only at turn boundaries so tool messages stay paired."""
+
     def append_exchange(self, session: AssistantSession, user_text: str, assistant_text: str) -> None:
-        """Store one completed user + assistant exchange."""
+        self.append_turn(session, [{"role": "user", "content": user_text},
+                                   {"role": "assistant", "content": assistant_text}])
 
 
 class InMemorySessionStore(SessionStore):
@@ -139,13 +150,14 @@ class InMemorySessionStore(SessionStore):
             session.last_active = now
             return session
 
-    def append_exchange(self, session: AssistantSession, user_text: str, assistant_text: str) -> None:
+    def append_turn(self, session: AssistantSession, messages: List[Dict[str, Any]]) -> None:
         with self._mutex:
-            session.messages.append({"role": "user", "content": user_text})
-            session.messages.append({"role": "assistant", "content": assistant_text})
-            excess = len(session.messages) - self._max_history
-            if excess > 0:
-                del session.messages[:excess]       # always even, so history still starts with a user turn
+            session.messages.extend(messages)
+            while len(session.messages) > self._max_history:
+                nxt = next((i for i in range(1, len(session.messages)) if session.messages[i]["role"] == "user"), None)
+                if nxt is None:
+                    break
+                del session.messages[:nxt]      # drop the oldest whole turn; history still starts with a user message
             session.last_active = self._clock()
 
 
@@ -159,105 +171,102 @@ def get_session_store() -> SessionStore:
     return _store
 
 
-_now = time.monotonic          # indirection so tests can control time
-
-DEVICE_CONTEXT_SECONDS = 120.0   # how long "turn it off" / a bare "on" still refers to the light
-
-CLARIFY_REPLY = "Do you want me to turn the light on or off?"
-LIGHT_FAILED_REPLY = "I couldn't send the light command. Please try again."
-PARTIAL_FALLBACK_REPLY = "I couldn't answer the rest of your message right now."
-# Wording is deliberate: publishing to the broker is not proof that the relay switched (no feedback channel).
-LIGHT_SENT_REPLY = {
-    "on": "I've sent the command to turn on the light.",
-    "off": "I've sent the command to turn off the light.",
-}
+def _max_tool_rounds() -> int:
+    try:
+        return max(1, int(os.getenv("ASSISTANT_MAX_TOOL_ITERATIONS", "").strip() or 3))
+    except ValueError:
+        return 3
 
 
 @dataclass(frozen=True)
 class ChatOutcome:
     """Result of one assistant turn. `action` tells the client what happened; `reply` is always what to speak."""
     reply: str
-    action: str = "chat"            # chat | device_control | device_control_failed | clarification | unsupported_device
-    device: Optional[str] = None
-    state: Optional[str] = None
+    action: str = "chat"            # chat | device_control | device_control_failed
+    device: Optional[str] = None    # e.g. "light" when a device tool ran
+    state: Optional[str] = None     # e.g. "on" / "off"
+    tool_calls: Tuple[Dict[str, Any], ...] = ()
 
 
-def _join_names(names) -> str:
-    names = list(names)
-    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+def _outcome(reply: str, executed: List[ExecutedCall]) -> ChatOutcome:
+    ran = [c for c in executed if c.ran]
+    if not ran:
+        action = "chat"                          # nothing was executed (rejected calls are only reported)
+    elif all(c.success for c in ran):
+        action = "device_control"
+    else:
+        action = "device_control_failed"
+    last = next((c for c in reversed(ran) if c.device), None)
+    return ChatOutcome(
+        reply=reply, action=action,
+        device=last.device if last else None,
+        state=last.arguments.get("state") if last else None,
+        tool_calls=tuple({"tool": c.tool, "arguments": c.arguments, "success": c.success} for c in executed),
+    )
 
 
-async def _answer_with_llm(session: AssistantSession, text: str, llm_provider: Callable[[], LLMService]) -> str:
-    llm = llm_provider()
+async def _run_turn(session: AssistantSession, text: str, llm: LLMService, registry: ToolRegistry,
+                    ) -> Tuple[List[Dict[str, Any]], str, List[ExecutedCall]]:
+    """The tool-calling loop. Returns (messages of this turn, final reply, executed tool calls).
+
+    LLM -> (text? done) | (tool calls? validate + execute each, send results back, repeat).
+    After ASSISTANT_MAX_TOOL_ITERATIONS rounds the model is told it may not call tools any more.
+    """
     system_prompt = context_service.build_system_prompt(session.employee_name, session.department)
-    return await llm.generate(system_prompt, list(session.messages) + [{"role": "user", "content": text}])
+    ctx = ToolContext(session.employee_pk, session.employee_code, session.employee_name, session.department)
+    executor = ToolExecutor(registry)
+    schemas = registry.openai_schemas()
+    history = list(session.messages)
+    turn: List[Dict[str, Any]] = [{"role": "user", "content": text}]
+    executed: List[ExecutedCall] = []
+    turn_cache: Dict[Tuple[str, str], ExecutedCall] = {}
+    rounds = _max_tool_rounds()
 
-
-async def _handle_device_intent(session: AssistantSession, intent: intent_service.Intent, message: str,
-                                llm_provider: Callable[[], LLMService], store: SessionStore,
-                                now: float) -> ChatOutcome:
-    """Run a device command without involving the LLM, then (only if the message also contained a
-    normal question) answer that remainder with the LLM so neither half of the message is lost."""
-    parts: List[str] = []
-    device: Optional[str] = None
-    state: Optional[str] = None
-
-    if intent.kind is intent_service.IntentKind.LIGHT:
-        device, state = "light", intent.state
-        if await device_service.set_light(intent.state):
-            action = "device_control"
-            parts.append(LIGHT_SENT_REPLY[intent.state])
-            session.last_light_at = now
-        else:
-            action = "device_control_failed"
-            parts.append(LIGHT_FAILED_REPLY)
-        if intent.unsupported_devices:
-            parts.append(f"I can't control the {_join_names(intent.unsupported_devices)} yet.")
-    elif intent.kind is intent_service.IntentKind.CLARIFY:
-        device, action = "light", "clarification"
-        session.awaiting_choice_at = now
-        parts.append(CLARIFY_REPLY)
-    else:  # UNSUPPORTED
-        names = intent.unsupported_devices or ("device",)
-        device, action = names[0].lower(), "unsupported_device"
-        parts.append(f"I can only control the light right now, so I can't do that with the {_join_names(names)} yet.")
-
-    if intent.remainder:
+    for round_no in range(rounds + 1):
+        choice = "auto" if round_no < rounds else "none"
         try:
-            parts.append(await _answer_with_llm(session, intent.remainder, llm_provider))
+            step = await llm.complete(system_prompt, history + turn, tools=schemas, tool_choice=choice)
         except LLMServiceError:
-            parts.append(PARTIAL_FALLBACK_REPLY)   # the command already happened; do not fail the whole turn
+            if not executed:
+                raise                              # nothing happened yet: fail the request, history untouched
+            # A tool already ran, so never lose that fact: answer from the tool results themselves.
+            logger.warning("LLM failed after tool execution; replying from tool results")
+            reply = " ".join(dict.fromkeys(c.user_message for c in executed))
+            turn.append({"role": "assistant", "content": reply})
+            return turn, reply, executed
 
-    reply = " ".join(parts)
-    store.append_exchange(session, message, reply)
-    return ChatOutcome(reply=reply, action=action, device=device, state=state)
+        if not step.tool_calls or choice == "none":
+            reply = step.text or " ".join(dict.fromkeys(c.user_message for c in executed)) or \
+                "I couldn't complete that request."
+            turn.append({"role": "assistant", "content": reply})
+            return turn, reply, executed
+
+        turn.append({"role": "assistant", "content": step.text or None, "tool_calls": [
+            {"id": c.id, "type": "function", "function": {"name": c.name, "arguments": c.arguments}}
+            for c in step.tool_calls]})
+        for call in step.tool_calls:
+            result = await executor.execute(call.name, call.arguments, ctx, turn_cache)
+            executed.append(result)
+            turn.append({"role": "tool", "tool_call_id": call.id, "content": result.content})
+
+    raise AssertionError("unreachable")          # the last round always has tool_choice="none"
 
 
 async def chat(session_id: str, message: str, llm_provider: Callable[[], LLMService],
-               store: Optional[SessionStore] = None) -> Tuple[AssistantSession, ChatOutcome]:
-    """Run one conversation turn: detect the intent first, then either control the device or ask the LLM.
+               store: Optional[SessionStore] = None,
+               registry: Optional[ToolRegistry] = None) -> Tuple[AssistantSession, ChatOutcome]:
+    """Run one conversation turn through the unified LLM + tools workflow.
 
-    Normal conversation keeps the old guarantee: the exchange is saved only if the LLM call succeeds, so a
-    failed request leaves the history untouched and the user can simply repeat themselves.
+    The turn is saved only if it completes, so a failed request leaves the history untouched and the
+    user can simply repeat themselves. (If a tool already ran, the turn IS saved: the command happened.)
     """
     store = store or get_session_store()
     session = store.get(session_id)
     if session is None:
         raise SessionNotFoundError()
 
-    async with session.lock:
-        now = _now()
-        light_context = session.last_light_at is not None and now - session.last_light_at <= DEVICE_CONTEXT_SECONDS
-        awaiting_choice = (session.awaiting_choice_at is not None
-                           and now - session.awaiting_choice_at <= DEVICE_CONTEXT_SECONDS)
-        session.awaiting_choice_at = None          # a clarification only applies to the very next message
-
-        intent = intent_service.detect_intent(message, light_context=light_context, awaiting_choice=awaiting_choice)
-        logger.info("Assistant intent: %s", intent.kind.value)       # never log the message text
-
-        if intent.kind is not intent_service.IntentKind.CHAT:
-            return session, await _handle_device_intent(session, intent, message, llm_provider, store, now)
-
-        reply = await _answer_with_llm(session, message, llm_provider)   # resolved after the session check:
-        store.append_exchange(session, message, reply)                   # bad session -> 401 even if LLM unconfigured
-    return session, ChatOutcome(reply=reply)
+    async with session.lock:                      # one turn at a time per employee: no interleaved tool runs
+        llm = llm_provider()                      # resolved after the session check: bad session -> 401 even
+        turn, reply, executed = await _run_turn(session, message, llm, registry or get_tool_registry())   # if LLM unconfigured
+        store.append_turn(session, turn)
+    return session, _outcome(reply, executed)

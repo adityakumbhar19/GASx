@@ -10,7 +10,7 @@ from app.router import assistant as assistant_router
 from app.services import conversation_service as cs
 from app.services import llm_service
 from app.services.conversation_service import InMemorySessionStore
-from app.services.llm_service import LLMServiceError
+from app.services.llm_service import LLMServiceError, LLMTurn
 
 UID = "0011482126"
 EMPLOYEE = {"id": 7, "employee_id": UID, "employee_name": "Gaurav", "department": "R&D", "card_uid": UID}
@@ -22,11 +22,11 @@ class FakeLLM:
         self.replies = []
         self.fail = None
 
-    async def generate(self, system_instruction, messages):
+    async def complete(self, system_instruction, messages, tools=None, tool_choice="auto"):
         self.calls.append((system_instruction, [dict(m) for m in messages]))
         if self.fail:
             raise self.fail
-        return self.replies.pop(0) if self.replies else f"reply #{len(self.calls)}"
+        return LLMTurn(text=self.replies.pop(0) if self.replies else f"reply #{len(self.calls)}")
 
 
 @pytest.fixture(autouse=True)
@@ -105,7 +105,8 @@ def test_chat_and_followup_use_history(client, llm):
 
     r1 = client.post("/api/v1/assistant/chat", json={"session_id": sid, "message": "Hello, how are you?"})
     assert r1.status_code == 200
-    assert r1.json() == {"success": True, "session_id": sid, "employee_name": "Gaurav", "reply": "reply #1"}
+    assert r1.json() == {"success": True, "session_id": sid, "employee_name": "Gaurav", "reply": "reply #1",
+                         "action": "chat", "device": None, "state": None, "tool_calls": []}
 
     r2 = client.post("/api/v1/assistant/chat", json={"session_id": sid, "message": "What did I just ask you?"})
     assert r2.json()["reply"] == "reply #2"
@@ -119,7 +120,7 @@ def test_chat_and_followup_use_history(client, llm):
         {"role": "user", "content": "What did I just ask you?"},
     ]
     assert "Gaurav" in system_prompt and "R&D" in system_prompt
-    assert "cannot control lights" in system_prompt         # no-device-claims rule is in the prompt
+    assert "control_light" in system_prompt and "never claim success" in system_prompt   # tool rules are in the prompt
 
 
 def test_history_survives_a_new_tap(client, llm):

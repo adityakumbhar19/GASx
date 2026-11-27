@@ -1,4 +1,7 @@
-"""Assistant endpoints: employee-bound sessions and LLM chat (conversation only, no device control)."""
+"""Assistant endpoints: employee-bound sessions and the ONE unified chat endpoint.
+
+/chat takes any text (typed, or speech-to-text from Android / Raspberry Pi). The LLM decides whether to answer
+or to call a registered tool (e.g. control_light); clients never decide that themselves."""
 import logging
 
 from fastapi import APIRouter, HTTPException
@@ -50,7 +53,7 @@ async def create_session(payload: AssistantSessionRequest) -> AssistantSessionRe
     )
 
 
-@router.post("/chat", response_model=AssistantChatResponse, summary="Send one message to the assistant")
+@router.post("/chat", response_model=AssistantChatResponse, summary="Send one message (question or command) to the assistant")
 async def chat(payload: AssistantChatRequest) -> AssistantChatResponse:
     try:
         session, outcome = await conversation_service.chat(
@@ -69,4 +72,5 @@ async def chat(payload: AssistantChatRequest) -> AssistantChatResponse:
         action=outcome.action,
         device=outcome.device,
         state=outcome.state,
+        tool_calls=list(outcome.tool_calls),
     )
